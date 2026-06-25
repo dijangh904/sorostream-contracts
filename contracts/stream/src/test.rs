@@ -195,3 +195,88 @@ fn test_get_claimable_calculates_correctly() {
     let claimable = c.get_claimable(&stream_id);
     assert_eq!(claimable, 25_000);
 }
+
+// ── transfer_recipient tests ──────────────────────────────────────────────────
+
+/// Happy path: current recipient transfers to a new wallet; subsequent withdraw
+/// routes tokens to the new address.
+#[test]
+fn test_transfer_recipient_and_withdraw() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &false);
+
+    let new_recipient = Address::generate(&t.env);
+    c.transfer_recipient(&stream_id, &new_recipient);
+
+    // Stream now points to new_recipient.
+    let stream = c.get_stream(&stream_id);
+    assert_eq!(stream.recipient, new_recipient);
+
+    // Withdraw at t=500 — tokens go to new_recipient, not old one.
+    t.env.ledger().set_timestamp(500);
+    c.withdraw(&stream_id, &new_recipient);
+
+    let new_bal = TokenClient::new(&t.env, &t.token_id).balance(&new_recipient);
+    let old_bal = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
+    assert_eq!(new_bal, 50_000);
+    assert_eq!(old_bal, 0);
+}
+
+/// Unauthorized party cannot transfer the recipient.
+#[test]
+#[should_panic]
+fn test_transfer_recipient_unauthorized_fails() {
+    // Use a non-mocked env so require_auth actually enforces signatures.
+    let env = Env::default();
+    let contract_id = env.register(SoroStreamContract, ());
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token_id).mint(&sender, &100_000);
+
+    let c = SoroStreamContractClient::new(&env, &contract_id);
+
+    // Use mock_all_auths only for setup calls.
+    env.mock_all_auths();
+    let stream_id = c.create_stream(&sender, &recipient, &token_id, &100_000, &1000, &false);
+    // Clear mocked auths so the next call is unauthenticated.
+    env.set_auths(&[]);
+
+    let new_wallet = Address::generate(&env);
+    let _ = (attacker, stream_id);
+    // Calling without any auth on the recipient should panic.
+    c.transfer_recipient(&stream_id, &new_wallet);
+}
+
+/// same-recipient rejection.
+#[test]
+fn test_transfer_recipient_same_address_fails() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &false);
+
+    let result = c.try_transfer_recipient(&stream_id, &t.recipient);
+    assert!(result.is_err());
+}
+
+/// transfer_recipient on a cancelled stream must fail.
+#[test]
+fn test_transfer_recipient_inactive_stream_fails() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &false);
+    c.cancel_stream(&stream_id, &t.sender);
+
+    let new_recipient = Address::generate(&t.env);
+    let result = c.try_transfer_recipient(&stream_id, &new_recipient);
+    assert!(result.is_err());
+}

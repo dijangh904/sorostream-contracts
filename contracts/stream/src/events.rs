@@ -53,3 +53,16 @@ pub fn stream_completed(env: &Env, stream_id: u64) {
         (),
     );
 }
+
+/// Emitted when a stream's recipient is transferred to a new address.
+pub fn stream_recipient_transferred(
+    env: &Env,
+    stream_id: u64,
+    old_recipient: &Address,
+    new_recipient: &Address,
+) {
+    env.events().publish(
+        (Symbol::new(env, "RecipientTransferred"), stream_id),
+        (old_recipient.clone(), new_recipient.clone()),
+    );
+}

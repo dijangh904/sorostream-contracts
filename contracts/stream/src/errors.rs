@@ -19,4 +19,6 @@ pub enum StreamError {
     InvalidDuration = 6,
     /// Contract has insufficient token balance.
     InsufficientBalance = 7,
+    /// new_recipient is the same as the current recipient.
+    SameRecipient = 8,
 }

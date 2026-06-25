@@ -184,6 +184,40 @@ impl SoroStreamContract {
         Ok(())
     }
 
+    /// Transfers a stream's beneficiary to a new address. Only the current recipient may call this.
+    ///
+    /// # Arguments
+    /// * `stream_id` - The stream to update.
+    /// * `new_recipient` - The new beneficiary address.
+    pub fn transfer_recipient(
+        env: Env,
+        stream_id: u64,
+        new_recipient: Address,
+    ) -> Result<(), StreamError> {
+        let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+        stream.recipient.require_auth();
+
+        if stream.status != StreamStatus::Active {
+            return Err(StreamError::StreamNotActive);
+        }
+        if stream.recipient == new_recipient {
+            return Err(StreamError::SameRecipient);
+        }
+
+        // Re-index: remove old recipient entry by adding new id under new recipient.
+        // (Index lists are append-only; we simply register the new recipient.)
+        index_by_recipient(&env, &new_recipient, stream_id);
+
+        let old_recipient = stream.recipient.clone();
+        stream.recipient = new_recipient.clone();
+        save_stream(&env, &stream);
+
+        events::stream_recipient_transferred(&env, stream_id, &old_recipient, &new_recipient);
+
+        Ok(())
+    }
+
     /// Adds more tokens to an existing stream, extending its end time proportionally.
     ///
     /// # Arguments
