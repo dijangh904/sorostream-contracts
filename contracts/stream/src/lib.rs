@@ -14,7 +14,7 @@ use soroban_sdk::{
 };
 use storage::{
     get_ids_by_recipient, get_ids_by_sender, index_by_recipient, index_by_sender,
-    load_stream, next_stream_id, save_stream,
+    load_stream, mark_nonce_used, next_stream_id, nonce_used, save_stream,
 };
 use types::{Stream, StreamStatus};
 
@@ -31,10 +31,12 @@ impl SoroStreamContract {
     /// * `token` - The SAC token contract address (e.g. USDC).
     /// * `amount` - Total tokens to stream (in stroops).
     /// * `duration_seconds` - Stream duration in seconds.
+    /// * `nonce` - Caller-supplied idempotency key; duplicate (sender, nonce) pairs are rejected.
     /// * `auto_renew` - Whether the stream restarts automatically on completion.
     ///
     /// # Returns
     /// The unique stream ID.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_stream(
         env: Env,
         sender: Address,
@@ -42,16 +44,22 @@ impl SoroStreamContract {
         token: Address,
         amount: i128,
         duration_seconds: u64,
+        nonce: u64,
         auto_renew: bool,
     ) -> Result<u64, StreamError> {
         sender.require_auth();
 
+        if nonce_used(&env, &sender, nonce) {
+            return Err(StreamError::DuplicateStream);
+        }
         if amount <= 0 {
             return Err(StreamError::ZeroAmount);
         }
         if duration_seconds == 0 {
             return Err(StreamError::InvalidDuration);
         }
+
+        mark_nonce_used(&env, &sender, nonce);
 
         let flow_rate = amount / duration_seconds as i128;
         let now = env.ledger().timestamp();
