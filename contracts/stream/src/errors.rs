@@ -19,6 +19,6 @@ pub enum StreamError {
     InvalidDuration = 6,
     /// Contract has insufficient token balance.
     InsufficientBalance = 7,
-    /// A stream with this nonce was already created by this sender.
-    DuplicateStream = 8,
+    /// cliff_time must be >= start_time and <= end_time.
+    InvalidCliff = 8,
 }
