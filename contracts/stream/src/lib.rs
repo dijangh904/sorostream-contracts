@@ -8,11 +8,18 @@ mod errors;
 mod events;
 mod storage;
 mod types;
+pub mod vesting_math;
 
 #[cfg(test)]
 mod test;
 #[cfg(test)]
 mod cost_bench;
+#[cfg(test)]
+mod proptest_tests;
+#[cfg(test)]
+mod differential_fuzz;
+#[cfg(test)]
+mod integration_tests;
 
 use errors::StreamError;
 use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Vec};
@@ -26,19 +33,6 @@ use types::{Stats, Stream, StreamStatus};
 
 #[contract]
 pub struct SoroStreamContract;
-
-pub fn fanout_create_stream(
-    env: Env,
-    sender: Address,
-    recipients: Vec<Address>,
-    weights: Vec<u32>,
-    token: Address,
-    total_amount: i128,
-    duration_seconds: u64,
-    cliff_seconds: u64,
-    nonce: u64,
-    auto_renew: bool,
-) -> Result<Vec<u64>, StreamError>
 
 #[contractimpl]
 impl SoroStreamContract {
@@ -199,12 +193,13 @@ impl SoroStreamContract {
 
         let now = env.ledger().timestamp();
         let effective_now = now.min(stream.end_time);
-        let elapsed = if now < stream.cliff_time {
-            0
-        } else {
-            effective_now.saturating_sub(stream.last_withdraw_time)
-        };
-        let claimable = stream.flow_rate * elapsed as i128;
+        let claimable = vesting_math::compute_claimable(
+            stream.flow_rate,
+            now,
+            stream.cliff_time,
+            stream.end_time,
+            stream.last_withdraw_time,
+        );
 
         if claimable > 0 {
             token::Client::new(&env, &stream.token).transfer(
@@ -237,6 +232,7 @@ impl SoroStreamContract {
                     stream.end_time = stream.start_time + duration;
                     stream.last_withdraw_time = stream.start_time;
                 }
+                save_stream(&env, &stream);
             } else {
                 events::stream_completed(&env, stream_id);
                 remove_stream(&env, stream_id);
@@ -268,11 +264,18 @@ impl SoroStreamContract {
         }
 
         let now = env.ledger().timestamp();
-        let effective_now = now.min(stream.end_time);
-        let elapsed = effective_now.saturating_sub(stream.last_withdraw_time);
-        let recipient_amount = stream.flow_rate * elapsed as i128;
-        let refund_amount = stream.deposit.saturating_sub(
-            stream.flow_rate * effective_now.saturating_sub(stream.start_time) as i128,
+        let recipient_amount = vesting_math::compute_earned(
+            stream.flow_rate,
+            now,
+            stream.end_time,
+            stream.last_withdraw_time,
+        );
+        let refund_amount = vesting_math::compute_refund(
+            stream.deposit,
+            stream.flow_rate,
+            now,
+            stream.end_time,
+            stream.start_time,
         );
 
         let token_client = token::Client::new(&env, &stream.token);
@@ -329,15 +332,22 @@ impl SoroStreamContract {
         }
 
         let now = env.ledger().timestamp();
-        let effective_now = now.min(stream.end_time);
 
         // Tokens already earned by the recipient (since last withdrawal).
-        let elapsed = effective_now.saturating_sub(stream.last_withdraw_time);
-        let earned = stream.flow_rate * elapsed as i128;
+        let earned = vesting_math::compute_earned(
+            stream.flow_rate,
+            now,
+            stream.end_time,
+            stream.last_withdraw_time,
+        );
 
         // Total streamed so far from start (already paid out in previous withdrawals + earned now).
-        let total_streamed =
-            stream.flow_rate * effective_now.saturating_sub(stream.start_time) as i128;
+        let total_streamed = vesting_math::compute_total_streamed(
+            stream.flow_rate,
+            now,
+            stream.end_time,
+            stream.start_time,
+        );
 
         // Remaining unstreamed deposit.
         let remaining = stream.deposit.saturating_sub(total_streamed);
@@ -494,13 +504,13 @@ impl SoroStreamContract {
         }
 
         let now = env.ledger().timestamp();
-        if now < stream.cliff_time {
-            return Ok(0);
-        }
-
-        let effective_now = now.min(stream.end_time);
-        let elapsed = effective_now.saturating_sub(stream.last_withdraw_time);
-        Ok(stream.flow_rate * elapsed as i128)
+        Ok(vesting_math::compute_claimable(
+            stream.flow_rate,
+            now,
+            stream.cliff_time,
+            stream.end_time,
+            stream.last_withdraw_time,
+        ))
     }
 
     /// Returns true if `address` is either the sender or recipient of the given stream.
@@ -683,8 +693,12 @@ impl SoroStreamContract {
 
             let now = env.ledger().timestamp();
             let effective_now = now.min(stream.end_time);
-            let elapsed = effective_now.saturating_sub(stream.last_withdraw_time);
-            let claimable = stream.flow_rate * elapsed as i128;
+            let claimable = vesting_math::compute_earned(
+                stream.flow_rate,
+                now,
+                stream.end_time,
+                stream.last_withdraw_time,
+            );
 
             if claimable > 0 {
                 let fee_bps = get_protocol_fee(&env);
