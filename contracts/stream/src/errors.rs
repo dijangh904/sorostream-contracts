@@ -35,4 +35,12 @@ pub enum StreamError {
     ContractPaused = 14,
     /// Amount is too small relative to duration: would produce a zero flow rate.
     ZeroFlowRate = 15,
+    /// Withdrawal attempted before lock_until has passed.
+    StreamLocked = 16,
+    /// Provided lock_until is invalid (must be >= start_time and <= end_time).
+    InvalidLockTime = 17,
+    /// Token does not match stream token.
+    TokenMismatch = 18,
+    /// Arrays have mismatched lengths in batch operation.
+    BatchLengthMismatch = 19,
 }

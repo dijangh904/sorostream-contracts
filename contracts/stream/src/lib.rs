@@ -8,6 +8,7 @@ mod errors;
 mod events;
 mod storage;
 mod types;
+pub mod interface;
 
 #[cfg(test)]
 mod test;
@@ -15,7 +16,7 @@ mod test;
 mod cost_bench;
 
 use errors::StreamError;
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Vec};
+use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Vec, Symbol, IntoVal};
 use storage::{
     check_admin, get_current_stream_id, get_ids_by_recipient, get_ids_by_sender,
     get_protocol_fee, get_treasury, index_by_recipient, index_by_sender, is_paused,
@@ -27,6 +28,7 @@ use types::{Stats, Stream, StreamStatus};
 #[contract]
 pub struct SoroStreamContract;
 
+#[allow(unused)]
 pub fn fanout_create_stream(
     env: Env,
     sender: Address,
@@ -38,7 +40,10 @@ pub fn fanout_create_stream(
     cliff_seconds: u64,
     nonce: u64,
     auto_renew: bool,
-) -> Result<Vec<u64>, StreamError>
+    lock_until: u64,
+) -> Result<Vec<u64>, StreamError> {
+    unimplemented!()
+}
 
 #[contractimpl]
 impl SoroStreamContract {
@@ -65,16 +70,20 @@ impl SoroStreamContract {
     }
 
     /// Pauses the contract. Only the admin may call this.
-    pub fn pause(env: Env) -> Result<(), StreamError> {
+    pub fn emergency_pause(env: Env) -> Result<(), StreamError> {
         check_admin(&env);
         set_paused(&env, true);
+        let admin = read_admin(&env).unwrap();
+        events::contract_paused(&env, &admin, env.ledger().timestamp());
         Ok(())
     }
 
     /// Unpauses the contract. Only the admin may call this.
-    pub fn unpause(env: Env) -> Result<(), StreamError> {
+    pub fn emergency_resume(env: Env) -> Result<(), StreamError> {
         check_admin(&env);
         set_paused(&env, false);
+        let admin = read_admin(&env).unwrap();
+        events::contract_resumed(&env, &admin, env.ledger().timestamp());
         Ok(())
     }
 
@@ -116,6 +125,7 @@ impl SoroStreamContract {
         cliff_seconds: u64,
         nonce: u64,
         auto_renew: bool,
+        lock_until: u64,
     ) -> Result<u64, StreamError> {
         sender.require_auth();
 
@@ -143,6 +153,11 @@ impl SoroStreamContract {
         let now = env.ledger().timestamp();
         let end_time = now + duration_seconds;
         let cliff_time = now + cliff_seconds;
+        
+        if lock_until < now || lock_until > end_time {
+            return Err(StreamError::InvalidLockTime);
+        }
+
         let stream_id = next_stream_id(&env);
 
         token::Client::new(&env, &token).transfer(
@@ -160,6 +175,7 @@ impl SoroStreamContract {
             flow_rate,
             start_time: now,
             cliff_time,
+            lock_until,
             end_time,
             last_withdraw_time: now,
             status: StreamStatus::Active,
@@ -186,6 +202,9 @@ impl SoroStreamContract {
     /// * `stream_id` - The stream to withdraw from.
     /// * `recipient` - Must match the stream's recipient (auth required).
     pub fn withdraw(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError> {
+        if is_paused(&env) {
+            return Err(StreamError::ContractPaused);
+        }
         recipient.require_auth();
 
         let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
@@ -198,6 +217,10 @@ impl SoroStreamContract {
         }
 
         let now = env.ledger().timestamp();
+        if now < stream.lock_until {
+            return Err(StreamError::StreamLocked);
+        }
+        
         let effective_now = now.min(stream.end_time);
         let elapsed = if now < stream.cliff_time {
             0
@@ -211,6 +234,11 @@ impl SoroStreamContract {
                 &env.current_contract_address(),
                 &recipient,
                 &claimable,
+            );
+            let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                &recipient,
+                &Symbol::new(&env, "on_stream_withdraw"),
+                (stream_id, claimable).into_val(&env),
             );
         }
 
@@ -237,6 +265,7 @@ impl SoroStreamContract {
                     stream.end_time = stream.start_time + duration;
                     stream.last_withdraw_time = stream.start_time;
                 }
+                save_stream(&env, &stream);
             } else {
                 events::stream_completed(&env, stream_id);
                 remove_stream(&env, stream_id);
@@ -379,6 +408,7 @@ impl SoroStreamContract {
             flow_rate: stream.flow_rate,
             start_time: now,
             cliff_time: now,
+            lock_until: now,
             end_time: new_end_time,
             last_withdraw_time: now,
             status: StreamStatus::Active,
@@ -414,6 +444,9 @@ impl SoroStreamContract {
         token: Address,
         amount: i128,
     ) -> Result<(), StreamError> {
+        if is_paused(&env) {
+            return Err(StreamError::ContractPaused);
+        }
         sender.require_auth();
 
         let mut stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
@@ -597,10 +630,14 @@ impl SoroStreamContract {
         token: Address,
         duration_seconds: u64,
         auto_renew: bool,
+        lock_untils: Vec<u64>,
     ) -> Result<Vec<u64>, StreamError> {
+        if is_paused(&env) {
+            return Err(StreamError::ContractPaused);
+        }
         sender.require_auth();
 
-        if recipients.len() != amounts.len() {
+        if recipients.len() != amounts.len() || recipients.len() != lock_untils.len() {
             return Err(StreamError::BatchLengthMismatch);
         }
 
@@ -625,6 +662,10 @@ impl SoroStreamContract {
         for i in 0..recipients.len().min(amounts.len()) {
             let recipient = recipients.get_unchecked(i);
             let amount = amounts.get_unchecked(i);
+            let lock_until = lock_untils.get_unchecked(i);
+            if lock_until < now || lock_until > end_time {
+                return Err(StreamError::InvalidLockTime);
+            }
             let flow_rate = amount / duration_seconds as i128;
             if flow_rate == 0 {
                 return Err(StreamError::ZeroFlowRate);
@@ -640,6 +681,7 @@ impl SoroStreamContract {
                 flow_rate,
                 start_time: now,
                 cliff_time: now,
+                lock_until,
                 end_time,
                 last_withdraw_time: now,
                 status: StreamStatus::Active,
@@ -667,6 +709,9 @@ impl SoroStreamContract {
         stream_ids: Vec<u64>,
         recipient: Address,
     ) -> Result<Vec<i128>, StreamError> {
+        if is_paused(&env) {
+            return Err(StreamError::ContractPaused);
+        }
         recipient.require_auth();
 
         let mut amounts = Vec::new(&env);
@@ -682,6 +727,10 @@ impl SoroStreamContract {
             }
 
             let now = env.ledger().timestamp();
+            if now < stream.lock_until {
+                return Err(StreamError::StreamLocked);
+            }
+
             let effective_now = now.min(stream.end_time);
             let elapsed = effective_now.saturating_sub(stream.last_withdraw_time);
             let claimable = stream.flow_rate * elapsed as i128;
@@ -695,6 +744,11 @@ impl SoroStreamContract {
 
                 if recipient_amount > 0 {
                     token_client.transfer(&env.current_contract_address(), &recipient, &recipient_amount);
+                    let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                        &recipient,
+                        &Symbol::new(&env, "on_stream_withdraw"),
+                        (stream_id, recipient_amount).into_val(&env),
+                    );
                 }
 
                 if fee_amount > 0 {
