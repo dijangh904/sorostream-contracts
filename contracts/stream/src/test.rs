@@ -111,8 +111,8 @@ fn test_withdraw_full() {
     let balance = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
     assert_eq!(balance, 100_000);
 
-    let stream = c.get_stream(&stream_id);
-    assert_eq!(stream.status, StreamStatus::Completed);
+    let result = c.try_get_stream(&stream_id);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -145,7 +145,7 @@ fn test_top_up_extends_duration() {
     let stream_id = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false);
     let stream_before = c.get_stream(&stream_id);
 
-    c.top_up(&stream_id, &t.sender, &50_000);
+    c.top_up(&stream_id, &t.sender, &t.token_id, &50_000);
 
     let stream_after = c.get_stream(&stream_id);
     assert_eq!(stream_after.end_time, stream_before.end_time + 500);
