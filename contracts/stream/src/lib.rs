@@ -1,14 +1,27 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
+//! # SoroStream Contract
+//!
+//! A Soroban smart contract for creating and managing payment streams.
+//!
+//! The formal interface is defined in [`SoroStreamInterface`].
+
 // Make `std` available to test modules (host target is not no_std).
 #[cfg(test)]
 extern crate std;
 
 mod errors;
 mod events;
+mod interface;
 mod storage;
 mod types;
 pub mod vesting_math;
+
+pub use interface::SoroStreamInterface;
+
+// Re-export types needed by the interface
+pub use errors::StreamError;
+pub use types::{Stream, Stats, StreamStatus};
 
 #[cfg(test)]
 mod test;
@@ -27,15 +40,6 @@ use storage::{
     unindex_by_sender, write_admin,
 };
 use types::{Stats, Stream, StreamStatus};
-
-/// Multiply `flow_rate * elapsed_seconds` with overflow protection.
-/// Both operands are user-influenced, so a panic here would be a DoS vector.
-#[inline]
-fn checked_flow_amount(flow_rate: i128, elapsed_seconds: u64) -> Result<i128, StreamError> {
-    flow_rate
-        .checked_mul(elapsed_seconds as i128)
-        .ok_or(StreamError::Overflow)
-}
 
 #[contract]
 pub struct SoroStreamContract;
@@ -154,7 +158,7 @@ impl SoroStreamContract {
         if amount <= 0 {
             return Err(StreamError::ZeroAmount);
         }
-        if cliff_seconds > duration_seconds {
+        if cliff_seconds >= duration_seconds {
             return Err(StreamError::InvalidCliff);
         }
 
@@ -245,24 +249,49 @@ impl SoroStreamContract {
         }
         
         let effective_now = now.min(stream.end_time);
-        let elapsed = if now < stream.cliff_time {
-            0u64
-        } else {
-            effective_now.saturating_sub(stream.last_withdraw_time)
-        };
-        // Checked: flow_rate * elapsed can overflow with large user-supplied values.
-        let claimable = checked_flow_amount(stream.flow_rate, elapsed)?;
+        let claimable = vesting_math::compute_claimable(
+            stream.flow_rate, now, stream.cliff_time, stream.end_time, stream.last_withdraw_time,
+        ).ok_or(StreamError::Overflow)?;
 
         if claimable > 0 {
-            token::Client::new(&env, &stream.token).transfer(
-                &env.current_contract_address(),
-                &recipient,
-                &claimable,
-            );
+            let fee_bps = get_protocol_fee(&env);
+            // fee_bps ≤ 10_000 (validated in set_protocol_fee), so
+            // claimable * fee_bps fits in i128 as long as claimable < i128::MAX / 10_000.
+            // claimable ≤ stream.deposit which is at most i128::MAX, so we check.
+            let fee_amount = if fee_bps > 0 {
+                claimable
+                    .checked_mul(fee_bps as i128)
+                    .ok_or(StreamError::Overflow)?
+                    / 10_000
+            } else {
+                0
+            };
+            let recipient_amount = claimable - fee_amount;
+
+            let token_client = token::Client::new(&env, &stream.token);
+
+            if recipient_amount > 0 {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &recipient,
+                    &recipient_amount,
+                );
+            }
+            if fee_amount > 0 {
+                if let Some(treasury) = get_treasury(&env) {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &treasury,
+                        &fee_amount,
+                    );
+                    events::fee_collected(&env, stream_id, fee_amount, &treasury);
+                }
+            }
+
             let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
                 &recipient,
                 &Symbol::new(&env, "on_stream_withdraw"),
-                (stream_id, claimable).into_val(&env),
+                (stream_id, recipient_amount).into_val(&env),
             );
         }
 
@@ -285,9 +314,15 @@ impl SoroStreamContract {
                         &env.current_contract_address(),
                         &stream.deposit,
                     );
+                    // Checked: new end_time could overflow if start_time is near u64::MAX.
+                    let new_end = stream
+                        .end_time
+                        .checked_add(duration)
+                        .ok_or(StreamError::Overflow)?;
                     stream.start_time = stream.end_time;
-                    stream.end_time = stream.start_time + duration;
+                    stream.end_time = new_end;
                     stream.last_withdraw_time = stream.start_time;
+                    save_stream(&env, &stream);
                 }
                 save_stream(&env, &stream);
 
@@ -340,6 +375,16 @@ impl SoroStreamContract {
             stream.end_time,
             stream.start_time,
         );
+        let now = env.ledger().timestamp();
+
+        let recipient_amount = vesting_math::compute_earned(
+            stream.flow_rate, now, stream.end_time, stream.last_withdraw_time,
+        ).ok_or(StreamError::Overflow)?;
+
+        let total_streamed = vesting_math::compute_total_streamed(
+            stream.flow_rate, now, stream.end_time, stream.start_time,
+        ).ok_or(StreamError::Overflow)?;
+        let refund_amount = stream.deposit.saturating_sub(total_streamed);
 
         let token_client = token::Client::new(&env, &stream.token);
 
@@ -397,13 +442,7 @@ impl SoroStreamContract {
             env.ledger().timestamp()
         };
 
-        // Tokens already earned by the recipient (since last withdrawal).
-        let earned = vesting_math::compute_earned(
-            stream.flow_rate,
-            now,
-            stream.end_time,
-            stream.last_withdraw_time,
-        );
+        let effective_now = now.min(stream.end_time);
 
         // Total streamed so far from start (already paid out in previous withdrawals + earned now).
         let total_streamed = vesting_math::compute_total_streamed(
@@ -412,6 +451,13 @@ impl SoroStreamContract {
             stream.end_time,
             stream.start_time,
         );
+        // Tokens earned since last withdrawal.
+        let elapsed_since_withdraw = now.saturating_sub(stream.last_withdraw_time);
+        let earned = checked_flow_amount(stream.flow_rate, elapsed_since_withdraw)?;
+
+        // Total streamed from start.
+        let elapsed_since_start = now.saturating_sub(stream.start_time);
+        let total_streamed = checked_flow_amount(stream.flow_rate, elapsed_since_start)?;
 
         // Remaining unstreamed deposit.
         let remaining = stream.deposit.saturating_sub(total_streamed);
@@ -601,6 +647,14 @@ impl SoroStreamContract {
         let effective_now = now.min(stream.end_time);
         let elapsed = effective_now.saturating_sub(stream.last_withdraw_time);
         checked_flow_amount(stream.flow_rate, elapsed)
+        let now = env.ledger().timestamp();
+        Ok(vesting_math::compute_claimable(
+            stream.flow_rate,
+            now,
+            stream.cliff_time,
+            stream.end_time,
+            stream.last_withdraw_time,
+        ))
     }
 
 
@@ -798,7 +852,7 @@ impl SoroStreamContract {
                 flow_rate,
                 start_time: now,
                 cliff_time: now,
-                lock_until,
+                lock_until: lock_untils.get_unchecked(i),
                 end_time,
                 last_withdraw_time: now,
                 status: StreamStatus::Active,
@@ -864,6 +918,9 @@ impl SoroStreamContract {
             };
             // Checked: flow_rate * elapsed can overflow with large inputs.
             let claimable = checked_flow_amount(stream.flow_rate, elapsed)?;
+            let claimable = vesting_math::compute_earned(
+                stream.flow_rate, now, stream.end_time, stream.last_withdraw_time,
+            ).ok_or(StreamError::Overflow)?;
 
             if claimable > 0 {
                 let fee_bps = get_protocol_fee(&env);
@@ -895,6 +952,11 @@ impl SoroStreamContract {
                             &env.current_contract_address(),
                             &treasury,
                             &fee_amount,
+                        );
+                        let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                            &treasury,
+                            &Symbol::new(&env, "deposit"),
+                            (stream.token.clone(), fee_amount).into_val(&env),
                         );
                     }
                 }
@@ -957,6 +1019,41 @@ impl SoroStreamContract {
         (get_protocol_fee(&env), get_treasury(&env))
     }
 
+    /// Withdraws accumulated protocol fees from the treasury contract.
+    /// Only the admin may call this.
+    pub fn withdraw_treasury(
+        env: Env,
+        token: Address,
+        amount: i128,
+        destination: Address,
+    ) -> Result<(), StreamError> {
+        check_admin(&env);
+        let treasury = get_treasury(&env).ok_or(StreamError::NotInitialized)?;
+        env.invoke_contract::<()>(
+            &treasury,
+            &Symbol::new(&env, "withdraw_treasury"),
+            (token, amount, destination).into_val(&env),
+        );
+        Ok(())
+    }
+
+    /// Withdraws all accumulated protocol fees for a token from the treasury contract.
+    /// Only the admin may call this.
+    pub fn withdraw_all_from_treasury(
+        env: Env,
+        token: Address,
+        destination: Address,
+    ) -> Result<i128, StreamError> {
+        check_admin(&env);
+        let treasury = get_treasury(&env).ok_or(StreamError::NotInitialized)?;
+        let result = env.invoke_contract::<i128>(
+            &treasury,
+            &Symbol::new(&env, "withdraw_all"),
+            (token, destination).into_val(&env),
+        );
+        Ok(result)
+    }
+
     /// Returns aggregate contract statistics.
     pub fn get_stats(env: Env) -> Stats {
         let mut total_streams = 0u64;
@@ -982,5 +1079,175 @@ impl SoroStreamContract {
             active_streams,
             total_volume,
         }
+    }
+}
+
+/// Implementation of the SoroStreamInterface trait for SoroStreamContract.
+///
+/// This implementation delegates to the corresponding contractimpl methods,
+/// providing type-safe invocation through the trait interface.
+impl SoroStreamInterface for SoroStreamContract {
+    fn initialize(env: Env, admin: Address) -> Result<(), StreamError> {
+        Self::initialize(env, admin)
+    }
+
+    fn get_admin(env: Env) -> Result<Address, StreamError> {
+        Self::get_admin(env)
+    }
+
+    fn set_admin(env: Env, new_admin: Address) -> Result<(), StreamError> {
+        Self::set_admin(env, new_admin)
+    }
+
+    fn emergency_pause(env: Env) -> Result<(), StreamError> {
+        Self::emergency_pause(env)
+    }
+
+    fn emergency_resume(env: Env) -> Result<(), StreamError> {
+        Self::emergency_resume(env)
+    }
+
+    fn is_paused(env: Env) -> bool {
+        Self::is_paused(env)
+    }
+
+    fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), StreamError> {
+        Self::upgrade(env, new_wasm_hash)
+    }
+
+    fn create_stream(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        amount: i128,
+        duration_seconds: u64,
+        cliff_seconds: u64,
+        nonce: u64,
+        auto_renew: bool,
+        lock_until: u64,
+    ) -> Result<u64, StreamError> {
+        Self::create_stream(
+            env,
+            sender,
+            recipient,
+            token,
+            amount,
+            duration_seconds,
+            cliff_seconds,
+            nonce,
+            auto_renew,
+            lock_until,
+        )
+    }
+
+    fn withdraw(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError> {
+        Self::withdraw(env, stream_id, recipient)
+    }
+
+    fn cancel_stream(env: Env, stream_id: u64, sender: Address) -> Result<(), StreamError> {
+        Self::cancel_stream(env, stream_id, sender)
+    }
+
+    fn partial_cancel_stream(
+        env: Env,
+        stream_id: u64,
+        sender: Address,
+        cancel_amount: i128,
+    ) -> Result<u64, StreamError> {
+        Self::partial_cancel_stream(env, stream_id, sender, cancel_amount)
+    }
+
+    fn top_up(
+        env: Env,
+        stream_id: u64,
+        sender: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), StreamError> {
+        Self::top_up(env, stream_id, sender, token, amount)
+    }
+
+    fn get_stream(env: Env, stream_id: u64) -> Result<Stream, StreamError> {
+        Self::get_stream(env, stream_id)
+    }
+
+    fn get_all_stream_ids(env: Env, start: u32, limit: u32) -> Vec<u64> {
+        Self::get_all_stream_ids(env, start, limit)
+    }
+
+    fn get_claimable(env: Env, stream_id: u64) -> Result<i128, StreamError> {
+        Self::get_claimable(env, stream_id)
+    }
+
+    fn is_participant(env: Env, stream_id: u64, address: Address) -> Result<bool, StreamError> {
+        Self::is_participant(env, stream_id, address)
+    }
+
+    fn get_streams_by_sender(env: Env, sender: Address, start: u32, limit: u32) -> Vec<Stream> {
+        Self::get_streams_by_sender(env, sender, start, limit)
+    }
+
+    fn get_streams_by_recipient(
+        env: Env,
+        recipient: Address,
+        start: u32,
+        limit: u32,
+    ) -> Vec<Stream> {
+        Self::get_streams_by_recipient(env, recipient, start, limit)
+    }
+
+    fn get_active_streams_by_sender(env: Env, sender: Address) -> Vec<Stream> {
+        Self::get_active_streams_by_sender(env, sender)
+    }
+
+    fn get_active_streams_by_recipient(env: Env, recipient: Address) -> Vec<Stream> {
+        Self::get_active_streams_by_recipient(env, recipient)
+    }
+
+    fn batch_create_stream(
+        env: Env,
+        sender: Address,
+        recipients: Vec<Address>,
+        amounts: Vec<i128>,
+        token: Address,
+        duration_seconds: u64,
+        auto_renew: bool,
+        lock_untils: Vec<u64>,
+    ) -> Result<Vec<u64>, StreamError> {
+        Self::batch_create_stream(
+            env,
+            sender,
+            recipients,
+            amounts,
+            token,
+            duration_seconds,
+            auto_renew,
+            lock_untils,
+        )
+    }
+
+    fn batch_withdraw(
+        env: Env,
+        stream_ids: Vec<u64>,
+        recipient: Address,
+    ) -> Result<Vec<i128>, StreamError> {
+        Self::batch_withdraw(env, stream_ids, recipient)
+    }
+
+    fn set_protocol_fee(env: Env, fee_bps: u32) -> Result<(), StreamError> {
+        Self::set_protocol_fee(env, fee_bps)
+    }
+
+    fn set_treasury_address(env: Env, treasury: Address) -> Result<(), StreamError> {
+        Self::set_treasury_address(env, treasury)
+    }
+
+    fn get_protocol_fee_info(env: Env) -> (u32, Option<Address>) {
+        Self::get_protocol_fee_info(env)
+    }
+
+    fn get_stats(env: Env) -> Stats {
+        Self::get_stats(env)
     }
 }
