@@ -8,6 +8,7 @@ mod errors;
 mod events;
 mod storage;
 mod types;
+pub mod vesting_math;
 
 #[cfg(test)]
 mod test;
@@ -245,6 +246,25 @@ impl SoroStreamContract {
         // Handle natural completion.
         if now >= stream.end_time {
             if stream.auto_renew {
+                let token_client = token::Client::new(&env, &stream.token);
+                let sender_balance = token_client.balance(&stream.sender);
+                if sender_balance < stream.deposit {
+                    events::auto_renew_failed(&env, stream_id, &stream.sender, stream.deposit);
+                    stream.status = StreamStatus::Completed;
+                    events::stream_completed(&env, stream_id);
+                } else {
+                    let duration = stream.end_time - stream.start_time;
+                    stream.sender.require_auth();
+                    token_client.transfer(
+                        &stream.sender,
+                        &env.current_contract_address(),
+                        &stream.deposit,
+                    );
+                    stream.start_time = stream.end_time;
+                    stream.end_time = stream.start_time + duration;
+                    stream.last_withdraw_time = stream.start_time;
+                }
+                save_stream(&env, &stream);
                 // end_time > start_time is an invariant maintained on creation.
                 let duration = stream.end_time - stream.start_time;
                 stream.sender.require_auth();
@@ -291,6 +311,19 @@ impl SoroStreamContract {
         }
 
         let now = env.ledger().timestamp();
+        let recipient_amount = vesting_math::compute_earned(
+            stream.flow_rate,
+            now,
+            stream.end_time,
+            stream.last_withdraw_time,
+        );
+        let refund_amount = vesting_math::compute_refund(
+            stream.deposit,
+            stream.flow_rate,
+            now,
+            stream.end_time,
+            stream.start_time,
+        );
         let effective_now = now.min(stream.end_time);
 
         // elapsed since last withdrawal — used for recipient payout.
@@ -353,8 +386,22 @@ impl SoroStreamContract {
         }
 
         let now = env.ledger().timestamp();
-        let effective_now = now.min(stream.end_time);
 
+        // Tokens already earned by the recipient (since last withdrawal).
+        let earned = vesting_math::compute_earned(
+            stream.flow_rate,
+            now,
+            stream.end_time,
+            stream.last_withdraw_time,
+        );
+
+        // Total streamed so far from start (already paid out in previous withdrawals + earned now).
+        let total_streamed = vesting_math::compute_total_streamed(
+            stream.flow_rate,
+            now,
+            stream.end_time,
+            stream.start_time,
+        );
         // Tokens earned since last withdrawal.
         let elapsed_since_withdraw = effective_now.saturating_sub(stream.last_withdraw_time);
         let earned = checked_flow_amount(stream.flow_rate, elapsed_since_withdraw)?;
@@ -528,6 +575,13 @@ impl SoroStreamContract {
         }
 
         let now = env.ledger().timestamp();
+        Ok(vesting_math::compute_claimable(
+            stream.flow_rate,
+            now,
+            stream.cliff_time,
+            stream.end_time,
+            stream.last_withdraw_time,
+        ))
         if now < stream.cliff_time {
             return Ok(0);
         }
@@ -715,6 +769,12 @@ impl SoroStreamContract {
 
             let now = env.ledger().timestamp();
             let effective_now = now.min(stream.end_time);
+            let claimable = vesting_math::compute_earned(
+                stream.flow_rate,
+                now,
+                stream.end_time,
+                stream.last_withdraw_time,
+            );
             let elapsed = effective_now.saturating_sub(stream.last_withdraw_time);
             // Checked: flow_rate * elapsed can overflow with large inputs.
             let claimable = checked_flow_amount(stream.flow_rate, elapsed)?;
