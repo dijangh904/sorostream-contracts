@@ -35,12 +35,20 @@ pub enum StreamError {
     ContractPaused = 14,
     /// Amount is too small relative to duration: would produce a zero flow rate.
     ZeroFlowRate = 15,
-    /// Withdrawal attempted before lock_until has passed.
-    StreamLocked = 16,
-    /// Provided lock_until is invalid (must be >= start_time and <= end_time).
-    InvalidLockTime = 17,
-    /// Token does not match stream token.
-    TokenMismatch = 18,
-    /// Arrays have mismatched lengths in batch operation.
-    BatchLengthMismatch = 19,
+    /// Batch recipients and amounts vectors have different lengths.
+    BatchLengthMismatch = 16,
+    /// Token address does not match the stream's token.
+    TokenMismatch = 17,
+    /// Token address does not match the stream's token.
+    TokenMismatch = 16,
+    /// Batch recipients and amounts vectors have different lengths.
+    BatchLengthMismatch = 17,
+    /// Top-up token address does not match the stream's token.
+    TokenMismatch = 16,
+    /// Batch recipients and amounts vectors have different lengths.
+    BatchLengthMismatch = 17,
+    /// A numeric operation overflowed or produced an out-of-range value.
+    /// This is returned instead of panicking when user-controllable inputs
+    /// (e.g. very large amounts or durations) would cause integer overflow.
+    Overflow = 15,
 }
