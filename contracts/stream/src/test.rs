@@ -1,4 +1,3 @@
-#![cfg(test)]
 
 use super::*;
 use soroban_sdk::{
@@ -6,10 +5,6 @@ use soroban_sdk::{
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env,
 };
-
-#[allow(dead_code)]
-const WASM: &[u8] =
-    include_bytes!("../../../target/wasm32v1-none/release/sorostream_stream.wasm");
 
 struct TestEnv {
     env: Env,
@@ -467,7 +462,7 @@ fn snapshot_event_stream_created() {
     let events = t.env.events().all();
     let create_events: std::vec::Vec<_> = events.iter().filter(|(_, topics, _)| {
         let topic_vec: soroban_sdk::Vec<Val> = topics.clone();
-        if topic_vec.len() >= 1 {
+        if !topic_vec.is_empty() {
             let first: Symbol = topic_vec.get(0).unwrap().into_val(&t.env);
             first == Symbol::new(&t.env, "StreamCreated")
         } else {
@@ -513,7 +508,7 @@ fn snapshot_event_stream_withdrawn() {
     let events = t.env.events().all();
     let withdraw_events: std::vec::Vec<_> = events.iter().filter(|(_, topics, _)| {
         let topic_vec: soroban_sdk::Vec<Val> = topics.clone();
-        if topic_vec.len() >= 1 {
+        if !topic_vec.is_empty() {
             let first: Symbol = topic_vec.get(0).unwrap().into_val(&t.env);
             first == Symbol::new(&t.env, "StreamWithdrawn")
         } else {
@@ -555,7 +550,7 @@ fn snapshot_event_stream_cancelled() {
     let events = t.env.events().all();
     let cancel_events: std::vec::Vec<_> = events.iter().filter(|(_, topics, _)| {
         let topic_vec: soroban_sdk::Vec<Val> = topics.clone();
-        if topic_vec.len() >= 1 {
+        if !topic_vec.is_empty() {
             let first: Symbol = topic_vec.get(0).unwrap().into_val(&t.env);
             first == Symbol::new(&t.env, "StreamCancelled")
         } else {
@@ -595,7 +590,7 @@ fn snapshot_event_stream_topped_up() {
     let events = t.env.events().all();
     let topup_events: std::vec::Vec<_> = events.iter().filter(|(_, topics, _)| {
         let topic_vec: soroban_sdk::Vec<Val> = topics.clone();
-        if topic_vec.len() >= 1 {
+        if !topic_vec.is_empty() {
             let first: Symbol = topic_vec.get(0).unwrap().into_val(&t.env);
             first == Symbol::new(&t.env, "StreamToppedUp")
         } else {
@@ -636,7 +631,7 @@ fn snapshot_event_stream_completed() {
     let events = t.env.events().all();
     let completed_events: std::vec::Vec<_> = events.iter().filter(|(_, topics, _)| {
         let topic_vec: soroban_sdk::Vec<Val> = topics.clone();
-        if topic_vec.len() >= 1 {
+        if !topic_vec.is_empty() {
             let first: Symbol = topic_vec.get(0).unwrap().into_val(&t.env);
             first == Symbol::new(&t.env, "StreamCompleted")
         } else {
@@ -678,7 +673,7 @@ fn snapshot_event_stream_partial_cancelled() {
     let events = t.env.events().all();
     let partial_events: std::vec::Vec<_> = events.iter().filter(|(_, topics, _)| {
         let topic_vec: soroban_sdk::Vec<Val> = topics.clone();
-        if topic_vec.len() >= 1 {
+        if !topic_vec.is_empty() {
             let first: Symbol = topic_vec.get(0).unwrap().into_val(&t.env);
             first == Symbol::new(&t.env, "StreamPartialCancelled")
         } else {
@@ -734,7 +729,7 @@ fn snapshot_event_auto_renew_failed() {
     let events = env.events().all();
     let renew_fail_events: std::vec::Vec<_> = events.iter().filter(|(_, topics, _)| {
         let topic_vec: soroban_sdk::Vec<Val> = topics.clone();
-        if topic_vec.len() >= 1 {
+        if !topic_vec.is_empty() {
             let first: Symbol = topic_vec.get(0).unwrap().into_val(&env);
             first == Symbol::new(&env, "AutoRenewFailed")
         } else {
@@ -984,7 +979,9 @@ fn error_invalid_duration_on_batch_create() {
     let amounts = soroban_vec![&t.env, 10_000i128];
 
     // duration_seconds = 0 causes end_time overflow check to fail
+    let lock_untils = soroban_vec![&t.env, 0u64];
     let result = c.try_batch_create_stream(
+        &t.sender, &recipients, &amounts, &t.token_id, &0, &false, &lock_untils,
         &t.sender, &recipients, &amounts, &t.token_id, &0, &false, &soroban_sdk::vec![&t.env, 0u64],
     );
     assert_eq!(result, Err(Ok(StreamError::InvalidDuration)));
@@ -1053,6 +1050,15 @@ fn error_duplicate_stream() {
 fn error_invalid_partial_cancel_exceeds_remainder() {
     let t = setup();
     let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64,
+    );
+
+    // At t=0: remaining = 100_000. cancel_amount = 100_000 exceeds remainder
+    // (must be strictly less than remaining).
+    let result = c.try_partial_cancel_stream(&stream_id, &t.sender, &100_000);
 
     let stream_id = c.create_stream(
         &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false,
@@ -1093,12 +1099,8 @@ fn test_create_stream_cliff_time_overflow() {
 
 /// Direct unit test of `checked_flow_amount`: a product that overflows i128
 /// returns `StreamError::Overflow` rather than panicking.
-///
-/// Via normal contract usage `flow_rate * elapsed ≤ deposit ≤ i128::MAX` (SAC
-/// bound), so this guard is defense-in-depth for future code paths.
 #[test]
 fn test_checked_flow_amount_overflow() {
-    // 10^19 * u64::MAX ≈ 1.844e38 > i128::MAX ≈ 1.701e38 → overflow.
     let result = checked_flow_amount(10_000_000_000_000_000_000_i128, u64::MAX);
     assert_eq!(result, Err(StreamError::Overflow));
 }
@@ -1110,22 +1112,24 @@ fn test_checked_flow_amount_ok() {
     assert_eq!(result, Ok(50_000));
 }
 
-/// `top_up` where `extra_seconds = top_up / flow_rate` overflows u64 must
-/// return an error. flow_rate = 1; top_up = u64::MAX + 1 tokens.
+/// `top_up` where `extra_seconds = top_up / flow_rate` overflows u64 must return an error.
 #[test]
 fn test_top_up_extra_seconds_overflow() {
     let t = setup();
     let c = client(&t);
     t.env.ledger().set_timestamp(0);
 
+    use soroban_sdk::token::StellarAssetClient;
+
+    // flow_rate = 1 stroop/sec
     let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &1_000, &1000, &0, &0u64, &false, &0u64,
         &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64,
     );
-
-    // At t=0: remaining = 100_000. cancel_amount = 100_000 exceeds remainder
-    // (must be strictly less than remaining).
-    let result = c.try_partial_cancel_stream(&stream_id, &t.sender, &100_000);
-    assert_eq!(result, Err(Ok(StreamError::InvalidPartialCancel)));
+    let huge: i128 = (u64::MAX as i128) + 1;
+    StellarAssetClient::new(&t.env, &t.token_id).mint(&t.sender, &huge);
+    let result = c.try_top_up(&stream_id, &t.sender, &t.token_id, &huge);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -1134,12 +1138,10 @@ fn error_invalid_partial_cancel_leaves_too_little() {
     let c = client(&t);
     t.env.ledger().set_timestamp(0);
 
-    // flow_rate = 100_000 / 1000 = 100
     let stream_id = c.create_stream(
         &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64,
     );
 
-    // remaining = 100_000. Cancel 99_950 → new_deposit = 50 < flow_rate (100).
     let result = c.try_partial_cancel_stream(&stream_id, &t.sender, &99_950);
     assert_eq!(result, Err(Ok(StreamError::InvalidPartialCancel)));
 }
@@ -1163,7 +1165,6 @@ fn error_zero_flow_rate() {
     let t = setup();
     let c = client(&t);
 
-    // amount=1, duration=1000 → flow_rate = 1/1000 = 0 (integer division)
     let result = c.try_create_stream(
         &t.sender, &t.recipient, &t.token_id, &1, &1000, &0, &0u64, &false, &0u64,
     );
@@ -1176,9 +1177,11 @@ fn error_zero_flow_rate_in_batch() {
     let c = client(&t);
 
     let recipients = soroban_vec![&t.env, t.recipient.clone()];
-    let amounts = soroban_vec![&t.env, 1i128]; // 1 / 1000 = 0 flow rate
+    let amounts = soroban_vec![&t.env, 1i128];
+    let lock_untils = soroban_vec![&t.env, 0u64];
 
     let result = c.try_batch_create_stream(
+        &t.sender, &recipients, &amounts, &t.token_id, &1000, &false, &lock_untils,
         &t.sender, &recipients, &amounts, &t.token_id, &1000, &false, &soroban_sdk::vec![&t.env, 0u64],
     );
     assert_eq!(result, Err(Ok(StreamError::ZeroFlowRate)));
@@ -1193,7 +1196,6 @@ fn error_token_mismatch() {
         &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64,
     );
 
-    // Create a different token
     let other_token_admin = Address::generate(&t.env);
     let other_token = t.env
         .register_stellar_asset_contract_v2(other_token_admin)
@@ -1209,9 +1211,11 @@ fn error_batch_length_mismatch() {
     let c = client(&t);
 
     let recipients = soroban_vec![&t.env, t.recipient.clone()];
-    let amounts = soroban_vec![&t.env, 10_000i128, 20_000i128]; // 2 amounts for 1 recipient
+    let amounts = soroban_vec![&t.env, 10_000i128, 20_000i128];
+    let lock_untils = soroban_vec![&t.env, 0u64, 0u64];
 
     let result = c.try_batch_create_stream(
+        &t.sender, &recipients, &amounts, &t.token_id, &1000, &false, &lock_untils,
         &t.sender, &recipients, &amounts, &t.token_id, &1000, &false, &soroban_sdk::vec![&t.env, 0u64],
     );
     assert_eq!(result, Err(Ok(StreamError::BatchLengthMismatch)));
@@ -1224,8 +1228,10 @@ fn error_zero_amount_in_batch() {
 
     let recipients = soroban_vec![&t.env, t.recipient.clone()];
     let amounts = soroban_vec![&t.env, 0i128];
+    let lock_untils = soroban_vec![&t.env, 0u64];
 
     let result = c.try_batch_create_stream(
+        &t.sender, &recipients, &amounts, &t.token_id, &1000, &false, &lock_untils,
         &t.sender, &recipients, &amounts, &t.token_id, &1000, &false, &soroban_sdk::vec![&t.env, 0u64],
     );
     assert_eq!(result, Err(Ok(StreamError::ZeroAmount)));
@@ -1250,7 +1256,6 @@ fn error_invalid_duration_fee_too_high() {
     let t = setup();
     let c = client(&t);
 
-    // set_protocol_fee reuses InvalidDuration for fee > 10_000
     let result = c.try_set_protocol_fee(&10_001u32);
     assert_eq!(result, Err(Ok(StreamError::InvalidDuration)));
 }
@@ -1283,12 +1288,10 @@ fn test_top_up_amount_overflow() {
 }
 
 /// `top_up` where `end_time + extra_seconds` overflows u64 must return an error.
-/// end_time = u64::MAX exactly; top_up of 1 token adds 1 second → overflow.
 #[test]
 fn test_top_up_end_time_overflow() {
     let t = setup();
     let c = client(&t);
-    // now + duration = (u64::MAX - 1000) + 1000 = u64::MAX; flow_rate = 1.
     t.env.ledger().set_timestamp(u64::MAX - 1_000);
 
     use soroban_sdk::token::StellarAssetClient;
@@ -1301,9 +1304,7 @@ fn test_top_up_end_time_overflow() {
     assert!(result.is_err());
 }
 
-/// `batch_create_stream` where accumulating amounts overflows i128 must return
-/// an error. Two amounts of 9×10^37 each sum to 1.8×10^38 > i128::MAX.
-/// Each is individually mintable; the overflow is caught in our accumulator.
+/// `batch_create_stream` where accumulating amounts overflows i128 must return an error.
 #[test]
 fn test_batch_create_total_amount_overflow() {
     let t = setup();
@@ -1317,6 +1318,7 @@ fn test_batch_create_total_amount_overflow() {
 
     let mut recipients = Vec::new(&t.env);
     let mut amounts: Vec<i128> = Vec::new(&t.env);
+    let lock_untils = soroban_vec![&t.env, 0u64, 0u64];
     recipients.push_back(Address::generate(&t.env));
     recipients.push_back(Address::generate(&t.env));
     amounts.push_back(a);

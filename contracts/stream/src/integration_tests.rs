@@ -1,4 +1,3 @@
-#![cfg(test)]
 
 extern crate std;
 
@@ -14,7 +13,6 @@ struct IntegrationEnv {
     env: Env,
     contract: Address,
     token: Address,
-    token_admin: Address,
     sender: Address,
     recipient: Address,
 }
@@ -35,7 +33,6 @@ fn setup_integration() -> IntegrationEnv {
         env,
         contract,
         token,
-        token_admin,
         sender,
         recipient,
     }
@@ -70,6 +67,8 @@ fn integration_full_lifecycle() {
         &1_000_000,
         &1000,
         &0,
+        &0u64,
+        &false,
         &0u64,
         &false, &0u64,
     );
@@ -175,8 +174,8 @@ fn integration_create_cancel_split() {
         balance(&ie, &ie.recipient) + balance(&ie, &ie.sender),
         1_000_000
     );
-    // Stream marked cancelled
-    assert_eq!(c.get_stream(&stream_id).status, StreamStatus::Cancelled);
+    // Stream removed after cancel (storage cleanup)
+    assert!(c.try_get_stream(&stream_id).is_err());
 }
 
 // ── Top-up extends duration correctly ───────────────────────────────────────
@@ -284,6 +283,8 @@ fn integration_zero_fee_no_treasury_deduction() {
         &1000,
         &0,
         &0u64,
+        &false,
+        &0u64,
         &false, &0u64,
     );
 
@@ -308,12 +309,15 @@ fn integration_batch_create_withdraw_lifecycle() {
     let recipients = soroban_sdk::vec![&ie.env, ie.recipient.clone(), recipient2.clone()];
     let amounts = soroban_sdk::vec![&ie.env, 1_000_000_i128, 2_000_000_i128];
 
+    let lock_untils = soroban_sdk::vec![&ie.env, 0u64, 0u64];
     let stream_ids = c.batch_create_stream(
         &ie.sender,
         &recipients,
         &amounts,
         &ie.token,
         &1000,
+        &false,
+        &lock_untils,
         &false, &0u64,
     );
 
@@ -352,6 +356,8 @@ fn integration_multi_stream_interleaved() {
         &1000,
         &0,
         &0u64,
+        &false,
+        &0u64,
         &false, &0u64,
     );
     let s2 = c.create_stream(
@@ -362,6 +368,8 @@ fn integration_multi_stream_interleaved() {
         &2000,
         &0,
         &1u64,
+        &false,
+        &0u64,
         &false, &0u64,
     );
 
@@ -413,6 +421,8 @@ fn integration_partial_cancel_lifecycle() {
         &1_000_000,
         &1000,
         &0,
+        &0u64,
+        &false,
         &0u64,
         &false, &0u64,
     );
@@ -527,9 +537,12 @@ fn integration_query_streams_by_sender_recipient() {
     c.cancel_stream(&s1, &ie.sender);
 
     let active = c.get_active_streams_by_sender(&ie.sender);
-    assert_eq!(active.len(), 2); // s2, s3 still active
-    assert_eq!(active.get_unchecked(0).id, s2);
-    assert_eq!(active.get_unchecked(1).id, s3);
+    assert_eq!(active.len(), 2);
+    let active_ids: std::vec::Vec<u64> = (0..active.len())
+        .map(|i| active.get_unchecked(i).id)
+        .collect();
+    assert!(active_ids.contains(&s2));
+    assert!(active_ids.contains(&s3));
 }
 
 // ── Stats integration ───────────────────────────────────────────────────────

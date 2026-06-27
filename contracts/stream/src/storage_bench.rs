@@ -9,8 +9,6 @@
 //! with the current read/write entry counts for each instruction. CI compares
 //! against this file to catch regressions exceeding 10 entries.
 
-#![cfg(test)]
-
 use std::println;
 
 use super::*;
@@ -26,7 +24,6 @@ struct StorageBenchEnv {
     token_id: Address,
     sender: Address,
     recipient: Address,
-    admin: Address,
 }
 
 fn setup() -> StorageBenchEnv {
@@ -41,7 +38,6 @@ fn setup() -> StorageBenchEnv {
 
     let sender = Address::generate(&env);
     let recipient = Address::generate(&env);
-    let admin = Address::generate(&env);
 
     StellarAssetClient::new(&env, &token_id).mint(&sender, &10_000_000);
 
@@ -51,7 +47,6 @@ fn setup() -> StorageBenchEnv {
         token_id,
         sender,
         recipient,
-        admin,
     }
 }
 
@@ -161,7 +156,9 @@ fn generate_storage_baseline() {
             recipients.push_back(Address::generate(&b.env));
             amounts.push_back(10_000i128);
         }
+        let lock_untils = soroban_sdk::vec![&b.env, 0u64, 0u64, 0u64, 0u64, 0u64];
         cl.batch_create_stream(
+            &b.sender, &recipients, &amounts, &b.token_id, &1000, &false, &lock_untils,
             &b.sender, &recipients, &amounts, &b.token_id, &1000, &false, &soroban_sdk::vec![&b.env, 0u64, 0u64, 0u64, 0u64, 0u64],
         );
         results.push(measure(&b.env, "batch_create_stream_n5"));
@@ -320,7 +317,9 @@ fn check_storage_baseline_regression() {
             recipients.push_back(Address::generate(&b.env));
             amounts.push_back(10_000i128);
         }
+        let lock_untils = soroban_sdk::vec![&b.env, 0u64, 0u64, 0u64, 0u64, 0u64];
         cl.batch_create_stream(
+            &b.sender, &recipients, &amounts, &b.token_id, &1000, &false, &lock_untils,
             &b.sender, &recipients, &amounts, &b.token_id, &1000, &false, &soroban_sdk::vec![&b.env, 0u64, 0u64, 0u64, 0u64, 0u64],
         );
         current.push(("batch_create_stream_n5", measure(&b.env, "batch_create_stream_n5")));

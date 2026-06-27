@@ -29,6 +29,10 @@ mod test;
 mod cost_bench;
 #[cfg(test)]
 mod storage_bench;
+#[cfg(test)]
+mod integration_tests;
+#[cfg(test)]
+mod testnet_integration_tests;
 
 use errors::StreamError;
 use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Vec, Symbol, IntoVal};
@@ -306,7 +310,9 @@ impl SoroStreamContract {
                     events::auto_renew_failed(&env, stream_id, &stream.sender, stream.deposit);
                     stream.status = StreamStatus::Completed;
                     events::stream_completed(&env, stream_id);
+                    save_stream(&env, &stream);
                 } else {
+                    // end_time > start_time is an invariant maintained on creation.
                     let duration = stream.end_time - stream.start_time;
                     stream.sender.require_auth();
                     token_client.transfer(
@@ -944,6 +950,7 @@ impl SoroStreamContract {
             }
 
             let effective_now = now.min(stream.end_time);
+            let elapsed = effective_now.saturating_sub(stream.last_withdraw_time);
             let elapsed = if now < stream.cliff_time {
                 0u64
             } else {

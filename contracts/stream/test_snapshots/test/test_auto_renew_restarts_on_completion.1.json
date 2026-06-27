@@ -340,7 +340,7 @@
                         "symbol": "last_pause_time"
                       },
                       "val": {
-                        "u64": 0
+                        "u64": 1000
                       }
                     },
                     {

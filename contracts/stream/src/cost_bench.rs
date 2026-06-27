@@ -32,8 +32,6 @@
 //! cargo test --package sorostream-stream -- cost_bench --nocapture
 //! ```
 
-#![cfg(test)]
-
 use std::println;
 
 use super::*;
