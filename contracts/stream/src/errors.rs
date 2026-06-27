@@ -39,4 +39,8 @@ pub enum StreamError {
     TokenMismatch = 16,
     /// Batch recipients and amounts vectors have different lengths.
     BatchLengthMismatch = 17,
+    /// A numeric operation overflowed or produced an out-of-range value.
+    /// This is returned instead of panicking when user-controllable inputs
+    /// (e.g. very large amounts or durations) would cause integer overflow.
+    Overflow = 15,
 }
