@@ -154,7 +154,7 @@ impl SoroStreamContract {
         if amount <= 0 {
             return Err(StreamError::ZeroAmount);
         }
-        if cliff_seconds > duration_seconds {
+        if cliff_seconds >= duration_seconds {
             return Err(StreamError::InvalidCliff);
         }
 
@@ -431,11 +431,11 @@ impl SoroStreamContract {
         let effective_now = now.min(stream.end_time);
 
         // Tokens earned since last withdrawal.
-        let elapsed_since_withdraw = effective_now.saturating_sub(stream.last_withdraw_time);
+        let elapsed_since_withdraw = now.saturating_sub(stream.last_withdraw_time);
         let earned = checked_flow_amount(stream.flow_rate, elapsed_since_withdraw)?;
 
         // Total streamed from start.
-        let elapsed_since_start = effective_now.saturating_sub(stream.start_time);
+        let elapsed_since_start = now.saturating_sub(stream.start_time);
         let total_streamed = checked_flow_amount(stream.flow_rate, elapsed_since_start)?;
 
         // Remaining unstreamed deposit.
@@ -737,6 +737,7 @@ impl SoroStreamContract {
         for i in 0..recipients.len().min(amounts.len()) {
             let recipient = recipients.get_unchecked(i);
             let amount = amounts.get_unchecked(i);
+            let lock_until = lock_untils.get_unchecked(i);
             // Division safe: duration_seconds > 0 validated above.
             let flow_rate = amount / duration_seconds as i128;
             if flow_rate == 0 {
@@ -847,6 +848,11 @@ impl SoroStreamContract {
                             &treasury,
                             &fee_amount,
                         );
+                        let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                            &treasury,
+                            &Symbol::new(&env, "deposit"),
+                            (stream.token.clone(), fee_amount).into_val(&env),
+                        );
                     }
                 }
             }
@@ -906,6 +912,41 @@ impl SoroStreamContract {
     /// Returns protocol fee configuration.
     pub fn get_protocol_fee_info(env: Env) -> (u32, Option<Address>) {
         (get_protocol_fee(&env), get_treasury(&env))
+    }
+
+    /// Withdraws accumulated protocol fees from the treasury contract.
+    /// Only the admin may call this.
+    pub fn withdraw_treasury(
+        env: Env,
+        token: Address,
+        amount: i128,
+        destination: Address,
+    ) -> Result<(), StreamError> {
+        check_admin(&env);
+        let treasury = get_treasury(&env).ok_or(StreamError::NotInitialized)?;
+        env.invoke_contract::<()>(
+            &treasury,
+            &Symbol::new(&env, "withdraw_treasury"),
+            (token, amount, destination).into_val(&env),
+        );
+        Ok(())
+    }
+
+    /// Withdraws all accumulated protocol fees for a token from the treasury contract.
+    /// Only the admin may call this.
+    pub fn withdraw_all_from_treasury(
+        env: Env,
+        token: Address,
+        destination: Address,
+    ) -> Result<i128, StreamError> {
+        check_admin(&env);
+        let treasury = get_treasury(&env).ok_or(StreamError::NotInitialized)?;
+        let result = env.invoke_contract::<i128>(
+            &treasury,
+            &Symbol::new(&env, "withdraw_all"),
+            (token, destination).into_val(&env),
+        );
+        Ok(result)
     }
 
     /// Returns aggregate contract statistics.
