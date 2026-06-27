@@ -288,7 +288,7 @@ fn test_cliff_withdraw_pre_cliff_transfers_nothing() {
     assert_eq!(balance, 0);
 }
 
-/// cliff_seconds > duration_seconds must fail with InvalidCliff.
+/// cliff_seconds >= duration_seconds must fail with InvalidCliff.
 #[test]
 fn test_cliff_exceeds_duration_fails() {
     let t = setup();
@@ -296,6 +296,16 @@ fn test_cliff_exceeds_duration_fails() {
 
     let result = c.try_create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &1001, &0u64, &false, &0u64);
     assert!(result.is_err());
+}
+
+/// cliff_seconds == duration_seconds must also fail with InvalidCliff.
+#[test]
+fn test_cliff_equals_duration_fails() {
+    let t = setup();
+    let c = client(&t);
+
+    let result = c.try_create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &1000, &0u64, &false, &0u64);
+    assert_eq!(result, Err(Ok(StreamError::InvalidCliff)));
 }
 
 #[test]
@@ -986,7 +996,7 @@ fn error_invalid_cliff() {
     let c = client(&t);
 
     let result = c.try_create_stream(
-        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &1001, &0u64, &false,
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &1001, &0u64, &false, &0u64,
     );
     assert_eq!(result, Err(Ok(StreamError::InvalidCliff)));
 }
@@ -1041,6 +1051,17 @@ fn error_duplicate_stream() {
 
 #[test]
 fn error_invalid_partial_cancel_exceeds_remainder() {
+    let t = setup();
+    let c = client(&t);
+
+    let stream_id = c.create_stream(
+        &t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false,
+    );
+
+    let result = c.try_partial_cancel_stream(&t.sender, stream_id, &100_000);
+    assert_eq!(result, Err(Ok(StreamError::InvalidPartialCancel)));
+}
+
 // ── Overflow / checked-arithmetic tests ──────────────────────────────────────
 
 /// `create_stream` with `now + duration_seconds` overflowing u64 must return
