@@ -1377,6 +1377,63 @@ fn test_delegate_cannot_withdraw() {
 }
 
 #[test]
+fn test_batch_cancel_stream_success() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let stream_id1 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64);
+    let stream_id2 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &200_000, &1000, &0, &1u64, &false, &0u64);
+
+    let sender_bal_before = TokenClient::new(&t.env, &t.token_id).balance(&t.sender);
+
+    t.env.ledger().set_timestamp(200);
+    c.batch_cancel_stream(&soroban_vec![&t.env, stream_id1, stream_id2], &t.sender);
+
+    // Stream 1: 20s earned (20_000), 80s refunded (80_000)
+    // Stream 2: 20s earned (40_000), 80s refunded (160_000)
+    let recipient_bal = TokenClient::new(&t.env, &t.token_id).balance(&t.recipient);
+    assert_eq!(recipient_bal, 20_000 + 40_000);
+
+    let sender_bal_after = TokenClient::new(&t.env, &t.token_id).balance(&t.sender);
+    assert_eq!(sender_bal_after, sender_bal_before + 80_000 + 160_000);
+
+    assert!(c.try_get_stream(&stream_id1).is_err());
+    assert!(c.try_get_stream(&stream_id2).is_err());
+}
+
+#[test]
+fn error_batch_cancel_not_sender() {
+    let t = setup();
+    let c = client(&t);
+    let other_sender = Address::generate(&t.env);
+    StellarAssetClient::new(&t.env, &t.token_id).mint(&other_sender, &1_000_000);
+
+    let stream_id1 = c.create_stream(&t.sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64);
+    let stream_id2 = c.create_stream(&other_sender, &t.recipient, &t.token_id, &100_000, &1000, &0, &0u64, &false, &0u64);
+
+    let result = c.try_batch_cancel_stream(&soroban_vec![&t.env, stream_id1, stream_id2], &t.sender);
+    assert_eq!(result, Err(Ok(StreamError::NotSender)));
+}
+
+#[test]
+fn error_batch_cancel_empty_list() {
+    let t = setup();
+    let c = client(&t);
+    let result = c.try_batch_cancel_stream(&soroban_vec![&t.env], &t.sender);
+    assert_eq!(result, Err(Ok(StreamError::BatchLengthMismatch)));
+}
+
+#[test]
+fn error_batch_cancel_too_long_list() {
+    let t = setup();
+    let c = client(&t);
+    let ids: Vec<u64> = (0..21).collect::<std::vec::Vec<u64>>().into_iter().collect_in(&t.env);
+    let result = c.try_batch_cancel_stream(&ids, &t.sender);
+    assert_eq!(result, Err(Ok(StreamError::BatchLengthMismatch)));
+}
+
+#[test]
 fn test_revoke_delegate_strips_capabilities() {
     let t = setup();
     let c = client(&t);

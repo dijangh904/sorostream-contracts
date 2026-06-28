@@ -436,6 +436,26 @@ pub trait SoroStreamInterface {
         recipient: Address,
     ) -> Result<Vec<i128>, StreamError>;
 
+    /// Cancels multiple streams in a single transaction.
+    ///
+    /// All streams must have the same sender. The sender receives a refund for the
+    /// unstreamed portion of each, and the recipient receives the earned portion.
+    ///
+    /// # Parameters
+    /// * `stream_ids` - Vector of stream IDs to cancel (max 20).
+    /// * `sender` - The stream creator (must sign the transaction).
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * `StreamError::StreamNotFound` if any stream ID does not exist.
+    /// * `StreamError::NotSender` if the caller is not the creator of all streams.
+    /// * `StreamError::StreamNotActive` if any stream is not in Active status.
+    /// * `StreamError::Overflow` if any intermediate calculation overflows.
+    /// * `StreamError::BatchLengthMismatch` if `stream_ids` is empty or exceeds 20.
+    fn batch_cancel_stream(env: Env, stream_ids: Vec<u64>, sender: Address) -> Result<(), StreamError>;
+
     /// Sets the protocol fee in basis points (100 bps = 1%).
     ///
     /// Only the admin may call this function. The fee is deducted from withdrawals and

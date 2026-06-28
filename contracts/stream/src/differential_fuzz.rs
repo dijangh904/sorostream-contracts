@@ -18,7 +18,7 @@ fn sdk_compute_claimable(
 ) -> i128 {
     if now < cliff_time {
         return 0;
-    }
+    } 
     let rate = deposit / (duration_secs as i128);
     if rate == 0 {
         return 0;

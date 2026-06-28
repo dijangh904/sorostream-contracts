@@ -582,6 +582,30 @@ fn bench_batch_withdraw_n20() {
     assert_within_limits(&b.env, "batch_withdraw (N=20)");
 }
 
+/// Batch-cancel 5 streams.
+#[test]
+fn bench_batch_cancel_stream_n5() {
+    let b = setup_bench();
+    let c = client(&b);
+    b.env.ledger().set_timestamp(0);
+
+    use soroban_sdk::Vec;
+
+    // Create 5 streams.
+    let mut stream_ids = Vec::new(&b.env);
+    for nonce in 0u64..5 {
+        let id = c.create_stream(
+            &b.sender, &b.recipient, &b.token_id,
+            &10_000, &1000, &0, &nonce, &false, &0u64,
+        );
+        stream_ids.push_back(id);
+    }
+    b.env.ledger().set_timestamp(200);
+
+    c.batch_cancel_stream(&stream_ids, &b.sender);
+    assert_within_limits(&b.env, "batch_cancel_stream (N=5)");
+}
+
 // ── Protocol fee / treasury benchmarks ───────────────────────────────────────
 
 #[test]
