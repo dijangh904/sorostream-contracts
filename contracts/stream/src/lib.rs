@@ -1059,6 +1059,63 @@ impl SoroStreamContract {
         Ok(amounts)
     }
 
+    /// Cancels multiple streams in a single transaction, returning per-stream results.
+    pub fn batch_cancel_stream(
+        env: Env,
+        stream_ids: Vec<u64>,
+        sender: Address,
+    ) -> Result<Vec<Result<(), StreamError>>, StreamError> {
+        sender.require_auth();
+
+        if stream_ids.is_empty() || stream_ids.len() > 20 {
+            return Err(StreamError::BatchLengthMismatch);
+        }
+
+        let mut results = Vec::new(&env);
+
+        for stream_id in stream_ids.iter() {
+            let result = (|| {
+                let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+
+                if stream.sender != sender {
+                    return Err(StreamError::NotSender);
+                }
+
+                if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
+                    return Err(StreamError::StreamNotActive);
+                }
+
+                let now = env.ledger().timestamp();
+                let recipient_amount = vesting_math::compute_earned(
+                    stream.flow_rate, now, stream.end_time, stream.last_withdraw_time,
+                ).ok_or(StreamError::Overflow)?;
+
+                let total_streamed = vesting_math::compute_total_streamed(
+                    stream.flow_rate, now, stream.end_time, stream.start_time,
+                ).ok_or(StreamError::Overflow)?;
+                let refund_amount = stream.deposit.saturating_sub(total_streamed);
+
+                let token_client = token::Client::new(&env, &stream.token);
+
+                if recipient_amount > 0 {
+                    token_client.transfer(&env.current_contract_address(), &stream.recipient, &recipient_amount);
+                }
+                if refund_amount > 0 {
+                    token_client.transfer(&env.current_contract_address(), &stream.sender, &refund_amount);
+                }
+
+                remove_stream(&env, stream_id);
+                unindex_by_sender(&env, &stream.sender, stream_id);
+                unindex_by_recipient(&env, &stream.recipient, stream_id);
+                events::stream_cancelled(&env, stream_id, &stream.sender, refund_amount, recipient_amount);
+                Ok(())
+            })();
+            results.push_back(result);
+        }
+
+        Ok(results)
+    }
+
     /// Sets the protocol fee in basis points (100 bps = 1%).
     pub fn set_protocol_fee(env: Env, fee_bps: u32) -> Result<(), StreamError> {
         if fee_bps > 10_000 {
@@ -1293,6 +1350,10 @@ impl SoroStreamInterface for SoroStreamContract {
         recipient: Address,
     ) -> Result<Vec<i128>, StreamError> {
         Self::batch_withdraw(env, stream_ids, recipient)
+    }
+
+    fn batch_cancel_stream(env: Env, stream_ids: Vec<u64>, sender: Address) -> Result<Vec<Result<(), StreamError>>, StreamError> {
+        Self::batch_cancel_stream(env, stream_ids, sender)
     }
 
     fn set_protocol_fee(env: Env, fee_bps: u32) -> Result<(), StreamError> {
